@@ -254,6 +254,7 @@ CREATE POLICY publishers_select_all
 CREATE POLICY publishers_insert_own
     ON hub.marketplace_publishers
     FOR INSERT
+    TO authenticated
     WITH CHECK (user_id = auth.uid()::text);
 
 -- 只有本人可更新自己的 profile
@@ -261,6 +262,7 @@ CREATE POLICY publishers_insert_own
 CREATE POLICY publishers_update_own
     ON hub.marketplace_publishers
     FOR UPDATE
+    TO authenticated
     USING  (user_id = auth.uid()::text)
     WITH CHECK (user_id = auth.uid()::text);
 
@@ -289,6 +291,7 @@ CREATE POLICY items_select_published_or_own
 CREATE POLICY items_insert_own
     ON hub.marketplace_items
     FOR INSERT
+    TO authenticated
     WITH CHECK (
         publisher_id IN (
             SELECT id FROM hub.marketplace_publishers
@@ -301,6 +304,7 @@ CREATE POLICY items_insert_own
 CREATE POLICY items_update_own
     ON hub.marketplace_items
     FOR UPDATE
+    TO authenticated
     USING (
         publisher_id IN (
             SELECT id FROM hub.marketplace_publishers
@@ -346,6 +350,7 @@ CREATE POLICY versions_select_active_or_own
 CREATE POLICY versions_insert_own
     ON hub.marketplace_versions
     FOR INSERT
+    TO authenticated
     WITH CHECK (
         item_id IN (
             SELECT i.id FROM hub.marketplace_items i
@@ -362,6 +367,22 @@ CREATE POLICY versions_insert_own
 -- ================================================================
 -- 列级权限：防止统计字段被直接篡改
 -- ================================================================
+
+-- Schema access
+GRANT USAGE ON SCHEMA hub TO anon, authenticated;
+
+-- Public marketplace browsing (anon can read)
+GRANT SELECT ON hub.marketplace_publishers  TO anon, authenticated;
+GRANT SELECT ON hub.marketplace_items       TO anon, authenticated;
+GRANT SELECT ON hub.marketplace_versions    TO anon, authenticated;
+
+-- Authenticated users can publish
+GRANT INSERT ON hub.marketplace_publishers  TO authenticated;
+GRANT UPDATE ON hub.marketplace_publishers  TO authenticated;
+GRANT INSERT ON hub.marketplace_items       TO authenticated;
+GRANT UPDATE ON hub.marketplace_items       TO authenticated;
+GRANT INSERT ON hub.marketplace_versions    TO authenticated;
+-- No UPDATE on versions (immutable after publish; yanking goes through RPC)
 
 -- 禁止 authenticated 直接修改统计字段和版本指针
 -- （install_count / rating_* 只能通过 SECURITY DEFINER RPC 递增）
