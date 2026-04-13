@@ -207,7 +207,7 @@ CREATE OR REPLACE FUNCTION hub.refresh_item_search_vector()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = hub, public
+SET search_path = hub, pg_catalog
 AS $$
 BEGIN
     NEW.search_vector :=
@@ -223,6 +223,22 @@ CREATE TRIGGER trg_items_search_vector
     ON hub.marketplace_items
     FOR EACH ROW
     EXECUTE FUNCTION hub.refresh_item_search_vector();
+
+-- updated_at 自动维护
+CREATE OR REPLACE FUNCTION hub.set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql
+SET search_path = hub, pg_catalog
+AS $$
+BEGIN NEW.updated_at = now(); RETURN NEW; END;
+$$;
+
+CREATE TRIGGER trg_publishers_updated_at
+    BEFORE UPDATE ON hub.marketplace_publishers
+    FOR EACH ROW EXECUTE FUNCTION hub.set_updated_at();
+
+CREATE TRIGGER trg_items_updated_at
+    BEFORE UPDATE ON hub.marketplace_items
+    FOR EACH ROW EXECUTE FUNCTION hub.set_updated_at();
 ```
 
 ---
@@ -445,7 +461,7 @@ CREATE OR REPLACE FUNCTION hub.publish_version(
 RETURNS TEXT          -- 返回新 version 的 id
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = hub, public
+SET search_path = hub, pg_catalog
 AS $$
 DECLARE
     v_version_id        TEXT := gen_random_uuid()::text;
@@ -515,7 +531,7 @@ CREATE OR REPLACE FUNCTION hub.record_install(
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = hub, public
+SET search_path = hub, pg_catalog
 AS $$
 BEGIN
     UPDATE hub.marketplace_items
@@ -544,7 +560,7 @@ CREATE OR REPLACE FUNCTION hub.yank_version(
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = hub, public
+SET search_path = hub, pg_catalog
 AS $$
 DECLARE
     v_item_id           TEXT;

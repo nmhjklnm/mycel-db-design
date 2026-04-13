@@ -803,6 +803,7 @@ RETURNS TABLE(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = identity, pg_catalog
 AS $$
 DECLARE
     v_rows INTEGER;
@@ -842,6 +843,7 @@ CREATE OR REPLACE FUNCTION identity.next_mycel_id()
 RETURNS INTEGER
 LANGUAGE sql
 SECURITY DEFINER
+SET search_path = identity, pg_catalog
 AS $$
     SELECT nextval('identity.mycel_id_seq')::integer;
 $$;
@@ -865,6 +867,7 @@ RETURNS TABLE(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = identity, pg_catalog
 AS $$
 DECLARE
     v_user_id TEXT;
@@ -921,6 +924,7 @@ CREATE OR REPLACE FUNCTION identity.upsert_user_setting(
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = identity, pg_catalog
 AS $$
 BEGIN
     INSERT INTO identity.user_settings (user_id, scope, config, updated_at)

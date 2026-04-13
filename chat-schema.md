@@ -241,6 +241,8 @@ CREATE TABLE chat.message_pins (
 CREATE INDEX idx_pins_chat
     ON chat.message_pins(chat_id, pinned_at DESC);
 
+CREATE INDEX idx_message_pins_message_id ON chat.message_pins(message_id);
+
 
 -- ================================================================
 -- 7. chat.chat_members
@@ -460,7 +462,15 @@ CREATE POLICY chats_update_owner ON chat.chats
               AND role IN ('owner', 'admin')
         )
     )
-    WITH CHECK (creator_user_id = creator_user_id); -- WITH CHECK 允许任意值（靠 USING 过滤）
+    WITH CHECK (
+        chat.is_member(id)
+        AND EXISTS (
+            SELECT 1 FROM chat.chat_members
+            WHERE chat_id = id
+              AND user_id = (SELECT auth.uid()::text)
+              AND role IN ('owner','admin')
+        )
+    );
 
 GRANT SELECT ON chat.chats TO authenticated;
 GRANT INSERT ON chat.chats TO authenticated;
@@ -610,7 +620,7 @@ CREATE POLICY pins_insert_admin ON chat.message_pins
         pinned_by = (SELECT auth.uid()::text)
         AND EXISTS (
             SELECT 1 FROM chat.chat_members m
-            WHERE m.chat_id = chat_id
+            WHERE m.chat_id = message_pins.chat_id
               AND m.user_id = (SELECT auth.uid()::text)
               AND m.role IN ('owner', 'admin')
         )
@@ -622,7 +632,7 @@ CREATE POLICY pins_delete_admin ON chat.message_pins
         pinned_by = (SELECT auth.uid()::text)
         OR EXISTS (
             SELECT 1 FROM chat.chat_members m
-            WHERE m.chat_id = chat_id
+            WHERE m.chat_id = message_pins.chat_id
               AND m.user_id = (SELECT auth.uid()::text)
               AND m.role IN ('owner', 'admin')
         )

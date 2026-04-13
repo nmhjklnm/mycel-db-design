@@ -701,7 +701,16 @@ CREATE POLICY agent_configs_update_own ON agent.agent_configs
     USING (owner_user_id = (SELECT auth.uid()::text))
     WITH CHECK (owner_user_id = (SELECT auth.uid()::text));
 
--- DELETE：不开放（agent 删除需要级联清理 identity.users + 所有相关表，走 service_role）
+CREATE POLICY agent_configs_insert ON agent.agent_configs
+    FOR INSERT TO authenticated
+    WITH CHECK (
+        owner_user_id = (SELECT auth.uid()::text)
+        AND agent_user_id = (SELECT auth.uid()::text)
+    );
+
+CREATE POLICY agent_configs_delete ON agent.agent_configs
+    FOR DELETE TO authenticated
+    USING (owner_user_id = (SELECT auth.uid()::text));
 
 GRANT SELECT ON agent.agent_configs TO authenticated;
 GRANT UPDATE (name, description, model, tools_json, system_prompt,
@@ -862,10 +871,38 @@ GRANT SELECT ON agent.summaries TO authenticated;
 ### agent.message_queue
 
 ```sql
--- message_queue 是后端内部队列，前端不需要直接访问
--- SELECT / INSERT / UPDATE / DELETE 均不开放给 authenticated
--- 全部走 mycel-agent service_role
--- （不创建任何 authenticated policy = 默认全拒绝）
+-- SELECT：能看到自己 agent 线程相关的消息（收到或发出）
+CREATE POLICY message_queue_select ON agent.message_queue
+    FOR SELECT TO authenticated
+    USING (
+        EXISTS (
+            SELECT 1 FROM agent.threads
+            WHERE id = message_queue.thread_id
+              AND owner_user_id = (SELECT auth.uid()::text)
+        )
+    );
+
+-- INSERT：能发送到自己 agent 拥有的线程
+CREATE POLICY message_queue_insert ON agent.message_queue
+    FOR INSERT TO authenticated
+    WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM agent.threads
+            WHERE id = message_queue.thread_id
+              AND owner_user_id = (SELECT auth.uid()::text)
+        )
+    );
+
+-- DELETE：消费后清理（线程 owner 可删）
+CREATE POLICY message_queue_delete ON agent.message_queue
+    FOR DELETE TO authenticated
+    USING (
+        EXISTS (
+            SELECT 1 FROM agent.threads
+            WHERE id = message_queue.thread_id
+              AND owner_user_id = (SELECT auth.uid()::text)
+        )
+    );
 ```
 
 ---
@@ -1041,8 +1078,8 @@ run_status 仅通过 `agent.set_thread_run_status` RPC 修改（见 §e），RPC
 用户直接 INSERT 进别人 thread 的 message_queue，发送恶意 interrupt 指令。
 
 **对策**：
-- message_queue 没有任何 authenticated 的 policy，默认全拒绝
-- 所有写入通过 mycel-agent API（service_role）
+- message_queue 的 INSERT/SELECT/DELETE policy 均通过 EXISTS 子查询校验 `owner_user_id = auth.uid()`，用户只能访问自己 thread 的消息
+- UPDATE 不开放给 authenticated（消息不可篡改，只能消费后删除）
 
 #### 风险 3：agent_config 级联越权
 

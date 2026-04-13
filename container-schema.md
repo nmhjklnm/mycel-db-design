@@ -617,6 +617,7 @@ RETURNS TABLE(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER  -- 以函数 owner 权限运行，绕过 RLS（daemon 通过 API 调）
+SET search_path = container, pg_catalog
 AS $$
 DECLARE
     v_rows INTEGER;
@@ -681,6 +682,7 @@ RETURNS TABLE(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = container, pg_catalog
 AS $$
 DECLARE
     v_rows        INTEGER;
@@ -736,6 +738,7 @@ RETURNS TABLE(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = container, pg_catalog
 AS $$
 DECLARE
     v_rows    INTEGER;
@@ -781,6 +784,7 @@ CREATE OR REPLACE FUNCTION container.device_disconnect(
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = container, pg_catalog
 AS $$
 BEGIN
     -- 设备标记 offline
@@ -839,6 +843,7 @@ RETURNS TABLE(
 LANGUAGE sql
 SECURITY DEFINER
 STABLE
+SET search_path = container, pg_catalog
 AS $$
     SELECT
         'environment'::text,
