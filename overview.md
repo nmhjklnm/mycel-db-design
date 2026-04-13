@@ -236,7 +236,7 @@ erDiagram
         jsonb deleted_for_user_ids "per-user 软删"
         timestamptz deleted_at "全员删除"
         timestamptz retracted_at
-        tsvector search_vector
+        text search_vector "tsvector GIN索引"
     }
     message_attachments {
         text id PK
@@ -302,7 +302,7 @@ erDiagram
 erDiagram
     agent_configs {
         text id PK
-        text agent_user_id FK UK "1:1 绑定 identity.users"
+        text agent_user_id UK "FK 1:1 identity.users"
         text owner_user_id FK
         text model "默认模型 alias"
         jsonb tools_json
@@ -488,9 +488,9 @@ erDiagram
 erDiagram
     publishers {
         text id PK
-        text user_id FK UK "1:1 绑定 identity.users"
+        text user_id UK "FK 1:1 identity.users"
         text display_name
-        text status "active · suspended"
+        text status "active 或 suspended"
         timestamptz created_at
     }
     marketplace_items {
@@ -501,7 +501,7 @@ erDiagram
         text visibility "public · unlisted · private"
         int install_count
         jsonb tags
-        tsvector search_vector "GIN 索引全文搜索"
+        text search_vector "tsvector GIN索引"
         timestamptz published_at
     }
     marketplace_versions {
@@ -509,7 +509,7 @@ erDiagram
         text item_id FK
         text version "语义版本 semver"
         text published_by FK
-        boolean yanked "true = 已下架"
+        text yanked "true则已下架"
         jsonb manifest
         timestamptz created_at
     }
