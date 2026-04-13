@@ -116,9 +116,12 @@ CREATE TABLE chat.messages (
         CHECK (content_type IN ('text', 'card', 'system', 'attachment')),
     -- seq 在同 chat 内唯一
     UNIQUE (chat_id, seq),
-    -- client_message_id 在同 chat 内唯一（NULL 排除在外）
-    UNIQUE NULLS NOT DISTINCT (chat_id, client_message_id)
 );
+
+-- client_message_id 在同 chat 内唯一（NULL 排除在外，用 partial index 代替 UNIQUE NULLS NOT DISTINCT）
+CREATE UNIQUE INDEX messages_client_dedup
+    ON chat.messages(chat_id, client_message_id)
+    WHERE client_message_id IS NOT NULL;
 
 -- 消息分页（最核心查询：加载 chat 历史）
 CREATE INDEX idx_messages_chat_seq
@@ -359,7 +362,7 @@ CREATE OR REPLACE VIEW chat.messages_for_user
 AS
 SELECT *
 FROM chat.messages
-WHERE NOT (deleted_for_user_ids @> to_jsonb(auth.uid()::text));
+WHERE NOT (deleted_for_user_ids @> jsonb_build_array(auth.uid()::text));
 ```
 
 ---
@@ -481,7 +484,7 @@ CREATE POLICY messages_select_member ON chat.messages
         AND deleted_at IS NULL  -- 全员删除的消息不可见
     );
 -- 注意：deleted_for_user_ids 的 per-user 过滤不在 RLS 里（JSONB @> 无行级索引）
--- 应用层 query 追加：AND NOT (deleted_for_user_ids @> to_jsonb(auth.uid()::text))
+-- 应用层 query 追加：AND NOT (deleted_for_user_ids @> jsonb_build_array(auth.uid()::text))
 
 CREATE POLICY messages_insert_member ON chat.messages
     FOR INSERT TO authenticated
@@ -912,7 +915,7 @@ GRANT EXECUTE ON FUNCTION chat.respond_to_friend_request(TEXT, BOOLEAN) TO authe
 
 **对策**：
 1. RLS 不做 per-user 过滤（仅做 membership 检查）
-2. 所有查询接口（PostgREST / mycel-chat API）**强制**追加 `AND NOT (deleted_for_user_ids @> to_jsonb(auth.uid()::text))`
+2. 所有查询接口（PostgREST / mycel-chat API）**强制**追加 `AND NOT (deleted_for_user_ids @> jsonb_build_array(auth.uid()::text))`
 3. 前端通过 PostgREST 查消息时，在 query string 中加 `deleted_for_user_ids=not.cs.["uid"]`（Supabase PostgREST 语法）
 4. 只要 API 层一致执行，数据不会泄露；漏加的 bug 代价是用户看到"已删除"条目，不是跨用户泄露
 
