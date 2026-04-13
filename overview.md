@@ -140,6 +140,347 @@ ALTER PUBLICATION supabase_realtime ADD TABLE
 
 ---
 
+## 各 Schema ER 图
+
+### identity — 身份根层（7 表）
+
+```mermaid
+erDiagram
+    users {
+        text id PK
+        text type "human 或 agent"
+        text display_name
+        text email UK
+        text mycel_id UK
+        text owner_user_id FK "agent 的归属人"
+        text agent_config_id FK
+        timestamptz created_at
+    }
+    accounts {
+        text id PK
+        text user_id FK
+        text username UK
+        text password_hash
+        text api_key_hash
+    }
+    assets {
+        text id PK
+        text owner_user_id FK
+        text kind "avatar · file · etc"
+        text storage_key
+        text sha256
+        text status
+    }
+    user_settings {
+        text user_id PK
+        text scope PK "general · ui · etc"
+        jsonb config
+        timestamptz updated_at
+    }
+    invite_codes {
+        text code PK
+        text created_by FK
+        text used_by FK
+        timestamptz expires_at
+    }
+    model_providers {
+        text id PK
+        text user_id FK
+        text name
+        text api_key_enc "AES-256-GCM 密文"
+        text endpoint
+        text status
+    }
+    model_mappings {
+        text id PK
+        text user_id FK
+        text provider_id FK
+        text alias UK
+        boolean is_active "同用户唯一激活"
+        jsonb params
+    }
+
+    users ||--o{ accounts : "登录凭据"
+    users ||--o{ assets : "拥有"
+    users ||--|| user_settings : "偏好配置"
+    users ||--o{ model_providers : "LLM 提供商"
+    model_providers ||--o{ model_mappings : "模型别名"
+    users ||--o{ users : "创建 agent user"
+```
+
+---
+
+### chat — 即时通讯（9 表 + 1 视图）
+
+```mermaid
+erDiagram
+    chats {
+        text id PK
+        text kind "dm · group · ai"
+        text creator_user_id FK
+        bigint next_message_seq "原子递增"
+        timestamptz last_message_at "冗余排序字段"
+        text last_message_preview
+        text status
+    }
+    messages {
+        text id PK
+        text chat_id FK
+        text sender_user_id FK
+        bigint seq UK "chat 内唯一"
+        text client_message_id UK "幂等防重"
+        text content
+        text content_type
+        text reply_to_message_id FK
+        text thread_root_id FK
+        jsonb deleted_for_user_ids "per-user 软删"
+        timestamptz deleted_at "全员删除"
+        timestamptz retracted_at
+        tsvector search_vector
+    }
+    message_attachments {
+        text id PK
+        text message_id FK
+        text asset_id FK
+        int sort_order
+    }
+    message_deliveries {
+        text message_id PK
+        text device_id PK "关联 container.devices"
+        text status "pending · delivered · failed"
+        timestamptz delivered_at
+    }
+    message_reactions {
+        text message_id PK
+        text user_id PK
+        text emoji PK
+    }
+    message_pins {
+        text id PK
+        text chat_id FK
+        text message_id FK
+        text pinned_by FK
+        timestamptz pinned_at
+    }
+    chat_members {
+        text chat_id PK
+        text user_id PK
+        text role "owner · admin · member"
+        bigint last_read_seq "未读水位线"
+        boolean muted
+        int version
+    }
+    contacts {
+        text id PK
+        text owner_user_id FK
+        text target_user_id FK
+        text kind
+        text state
+    }
+    relationships {
+        text id PK
+        text user_low FK "user_id 较小者"
+        text user_high FK "user_id 较大者"
+        text initiator_user_id FK
+        text status "pending · accepted · blocked"
+    }
+
+    chats ||--|{ chat_members : "成员"
+    chats ||--o{ messages : "消息"
+    chats ||--o{ message_pins : "置顶"
+    messages ||--o{ message_attachments : "附件"
+    messages ||--o{ message_deliveries : "投递追踪"
+    messages ||--o{ message_reactions : "反馈"
+    messages ||--o{ messages : "回复线程"
+```
+
+---
+
+### agent — AI 对话与调度（17 表）
+
+```mermaid
+erDiagram
+    agent_configs {
+        text id PK
+        text agent_user_id FK UK "1:1 绑定 identity.users"
+        text owner_user_id FK
+        text model "默认模型 alias"
+        jsonb tools_json
+        text system_prompt
+        jsonb mcp_json
+    }
+    agent_rules { text id PK; text config_id FK }
+    agent_skills { text id PK; text config_id FK }
+    agent_sub_agents { text id PK; text config_id FK; text sub_agent_user_id FK }
+
+    threads {
+        text id PK
+        text agent_user_id FK
+        text owner_user_id FK
+        text current_workspace_id FK "关联 container.workspaces"
+        text status "active · archived"
+        text run_status "idle · running · paused · error"
+        timestamptz last_active_at
+        int version
+    }
+    thread_launch_prefs { text id PK; text thread_id FK; jsonb prefs }
+
+    run_events {
+        text id PK
+        text thread_id FK
+        text type
+        jsonb data
+        timestamptz created_at "无界增长，建议按月分区"
+    }
+    summaries {
+        text id PK
+        text thread_id FK
+        text content
+        boolean is_active "当前有效摘要"
+        int token_count
+    }
+    message_queue {
+        text id PK
+        text thread_id FK
+        text role
+        text content
+        timestamptz created_at "id ASC 顺序消费"
+    }
+    file_operations { text id PK; text thread_id FK; text operation; text path }
+    tool_tasks {
+        text id PK
+        text thread_id FK
+        text tool_name
+        text status
+        jsonb progress
+        jsonb result
+    }
+
+    schedules {
+        text id PK
+        text owner_user_id FK
+        text agent_user_id FK
+        text cron_expr
+        boolean enabled
+        timestamptz next_run_at
+    }
+    schedule_runs { text id PK; text schedule_id FK; text status; timestamptz ran_at }
+
+    checkpoints {
+        text thread_id PK "LangGraph checkpoint_id"
+        text checkpoint_id PK
+        jsonb metadata
+    }
+    checkpoint_blobs { text thread_id PK; text checkpoint_id PK; text channel PK }
+    checkpoint_writes { text thread_id PK; text checkpoint_id PK; int idx PK }
+    checkpoint_migrations { int v PK }
+
+    agent_configs ||--o{ agent_rules : ""
+    agent_configs ||--o{ agent_skills : ""
+    agent_configs ||--o{ agent_sub_agents : ""
+    threads ||--o{ run_events : "执行日志"
+    threads ||--o{ summaries : "上下文压缩"
+    threads ||--o{ message_queue : "待处理消息"
+    threads ||--o{ file_operations : ""
+    threads ||--o{ tool_tasks : "长任务"
+    threads ||--o{ checkpoints : "LangGraph 状态"
+    schedules ||--o{ schedule_runs : "执行记录"
+```
+
+---
+
+### container — 计算基础设施（3 表）
+
+```mermaid
+erDiagram
+    devices {
+        text id PK
+        text owner_user_id FK
+        text name
+        text device_type "desktop · server · cloud_vm"
+        text platform "macos · linux · windows"
+        text arch
+        jsonb capabilities "docker · gpu · cpus 等"
+        text push_token
+        text push_platform "apns · fcm · web_push"
+        text status "online · offline · disabled"
+        timestamptz last_heartbeat_at
+        int version "乐观锁"
+    }
+    environments {
+        text id PK
+        text device_id FK
+        text owner_user_id FK
+        text provider_name "local · docker · fly · e2b"
+        text provider_env_id UK "同设备下唯一"
+        text image
+        text desired_state "running · stopped"
+        text observed_state "running · stopped · creating · detached · error"
+        text status "active · archived · deleted"
+        timestamptz last_seen_at
+        text last_error
+        int version "乐观锁"
+    }
+    workspaces {
+        text id PK
+        text environment_id FK
+        text owner_user_id FK
+        text workspace_path UK "同环境下唯一"
+        text recipe_id FK
+        jsonb recipe_snapshot "创建时快照，重建用"
+        text volume_id FK
+        text desired_state "running · stopped"
+        text observed_state "running · stopped · creating · detached · error"
+        text status "active · archived · deleted"
+        boolean needs_refresh
+        timestamptz refresh_hint_at
+        int version "乐观锁"
+    }
+
+    devices ||--o{ environments : "托管"
+    environments ||--o{ workspaces : "包含"
+```
+
+---
+
+### hub — Agent 市场（3 表）
+
+```mermaid
+erDiagram
+    publishers {
+        text id PK
+        text user_id FK UK "1:1 绑定 identity.users"
+        text display_name
+        text status "active · suspended"
+        timestamptz created_at
+    }
+    marketplace_items {
+        text id PK
+        text publisher_id FK
+        text name
+        text slug UK
+        text visibility "public · unlisted · private"
+        int install_count
+        jsonb tags
+        tsvector search_vector "GIN 索引全文搜索"
+        timestamptz published_at
+    }
+    marketplace_versions {
+        text id PK
+        text item_id FK
+        text version "语义版本 semver"
+        text published_by FK
+        boolean yanked "true = 已下架"
+        jsonb manifest
+        timestamptz created_at
+    }
+
+    publishers ||--o{ marketplace_items : "发布"
+    marketplace_items ||--o{ marketplace_versions : "版本历史"
+```
+
+---
+
 ## 5 个核心 RPC 概览
 
 | RPC | 所属 schema | 功能 |
