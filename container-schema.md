@@ -5,14 +5,13 @@
 > **命名决策**：中间层采用 `sandboxes`（非 `containers`）。
 > 32-schema-decisions.md 中写的是 `container.containers`，但会造成 schema/table 同名混淆；
 > 33-open-questions.md 和任务 prompt 均使用 `environments`，后更名为 `sandboxes`，语义上更准确（隔离沙盒环境）。
-> 其他依赖此表的表（terminals、terminal_sessions 等）字段名应从 `container_id` 改为 `sandbox_id`，需后续对齐。
 
 ---
 
 ```sql
 -- ================================================================
 -- Schema: container
--- 三层模型: devices → sandboxes → workspaces / terminals
+-- 三层模型: devices → sandboxes → workspaces
 -- 跨 schema FK 统一用应用层校验，不加 DB 外键约束
 -- ================================================================
 
@@ -237,9 +236,6 @@ CREATE TABLE container.workspaces (
     workspace_path   TEXT,
         -- 容器内绝对路径，e.g. "/workspace/mycel-backend"
         -- 同沙盒下路径唯一（见 uq_workspaces_sandbox_path）
-    -- 存储绑定
-    volume_id        TEXT,
-        -- → container.volumes.id（应用层）；数据卷归 device，workspace 可重建
     -- 双轨状态机（与 sandboxes 对齐）
     desired_state    TEXT        NOT NULL DEFAULT 'running',
         -- 'running' | 'stopped'
@@ -277,7 +273,7 @@ CREATE UNIQUE INDEX uq_workspaces_sandbox_path
     ON container.workspaces(sandbox_id, workspace_path)
     WHERE workspace_path IS NOT NULL AND status != 'deleted';
 
--- 沙盒的所有工作区（展示工作区列表、terminal 查询）
+-- 沙盒的所有工作区（展示工作区列表）
 CREATE INDEX idx_workspaces_sandbox
     ON container.workspaces(sandbox_id)
     WHERE status = 'active';

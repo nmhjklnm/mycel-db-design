@@ -94,7 +94,7 @@ CREATE TABLE identity.accounts (
 -- ================================================================
 -- 3. identity.assets
 -- 用户主动管理的静态资源（头像、上传文件）
--- agent 产出物不进此表（走 container.volumes）
+-- agent 产出物不进此表（直传 Supabase Storage）
 -- kind='avatar' 对所有认证用户公开（见 RLS §b）
 -- ================================================================
 
