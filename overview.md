@@ -4,58 +4,60 @@
 
 ```mermaid
 mindmap
-  root((Mycel DB<br/>━━━━━━━━━━<br/>5 schema<br/>39 表 + 1 视图))
+  root((Mycel DB<br/>5 schema · 39 表))
 
-    **identity**<br/>身份与账号根层<br/>所有 schema 的共享只读层
-      users<br/>👤 human + agent 共表<br/>type 字段区分<br/>owner_user_id 指向创建者
-      accounts<br/>🔑 登录凭据<br/>username · password_hash<br/>api_key_hash
-      assets<br/>🖼 用户静态资源<br/>头像 · 用户上传文件<br/>kind 字段区分用途
-      user_settings<br/>⚙️ KV 配置存储<br/>(user_id, scope) PK<br/>config JSONB
-      invite_codes<br/>📨 注册邀请码<br/>控制谁能注册<br/>used_by · expires_at
-      model_providers<br/>🤖 LLM 提供商连接<br/>api_key_enc 加密存储<br/>状态 · 健康检查 ★Realtime
-      model_mappings<br/>🗺 模型别名映射<br/>alias → 实际模型<br/>is_active 唯一激活
+    identity<br/>身份根层<br/>所有 schema 共享
+      users<br/>👤 human + agent 共表<br/>type 区分身份类型
+      accounts<br/>🔑 登录凭据
+      assets<br/>🖼 头像与用户文件<br/>kind 区分用途
+      user_settings<br/>⚙️ KV 配置<br/>user_id + scope 为主键
+      invite_codes<br/>📨 注册邀请码
+      model_providers<br/>🤖 LLM 提供商<br/>api_key 加密存储 ★RT
+      model_mappings<br/>🗺 模型别名<br/>is_active 唯一激活
 
-    **chat**<br/>即时通讯<br/>9 表 + 1 视图<br/>所有写入走 mycel-chat 服务
-      chats<br/>💬 会话容器<br/>kind: dm · group · ai<br/>next_message_seq 原子递增
-      messages<br/>📩 消息主体<br/>seq 单调递增 · 幂等防重<br/>E2E 加密预留 ★Realtime
-      messages_for_user<br/>👁 VIEW<br/>自动过滤 per-user 软删除<br/>开发者应查此视图
-      message_attachments<br/>📎 消息附件<br/>关联 identity.assets<br/>一条消息多个附件
-      message_deliveries<br/>📲 多设备投递追踪<br/>关联 container.devices<br/>驱动 push 通知
-      message_reactions<br/>👍 emoji 反馈<br/>agent 反馈信号<br/>可用于 RLHF 训练
-      message_pins<br/>📌 消息置顶<br/>群公告 · agent 关键产出<br/>记录 pin 操作人
-      chat_members<br/>👥 成员 + 权限<br/>last_read_seq 水位线<br/>未读数基于水位线计算
-      contacts<br/>📇 通讯录有向边<br/>kind + state 双字段<br/>fjj 设计：非单枚举
-      relationships<br/>🤝 好友状态机<br/>user_low / user_high 规范化<br/>initiator_user_id 记录发起方 ★Realtime
+    chat<br/>即时通讯<br/>9表+1视图
+      chats<br/>💬 会话容器<br/>dm · group · ai
+      messages<br/>📩 消息主体<br/>seq幂等 E2E预留 ★RT
+      messages_for_user<br/>👁 VIEW<br/>per-user软删过滤
+      message_attachments<br/>📎 消息附件
+      message_deliveries<br/>📲 多设备投递追踪
+      message_reactions<br/>👍 emoji反馈
+      message_pins<br/>📌 消息置顶
+      chat_members<br/>👥 成员水位线<br/>last_read_seq未读计数
+      contacts<br/>📇 通讯录有向边
+      relationships<br/>🤝 好友状态机 ★RT
 
-    **agent**<br/>AI 对话与调度<br/>17 张表<br/>LangGraph 深度集成
-      agent_configs<br/>🧠 agent 行为定义<br/>1:1 绑定 identity.users<br/>tools · prompt · mcp 配置
+    agent<br/>AI对话与调度<br/>17张表
+      agent_configs<br/>🧠 行为定义<br/>1:1 绑定 agent user
       agent_rules<br/>📋 行为规则
       agent_skills<br/>🛠 技能定义
-      agent_sub_agents<br/>🤖 子 agent 编排
-      threads<br/>🧵 对话线程<br/>status: 生命周期<br/>run_status: 运行状态 ★Realtime
-      thread_launch_prefs<br/>🚀 启动偏好<br/>默认 workspace · 模型
-      run_events<br/>📊 执行日志<br/>⚠️ 无界增长<br/>建议按月分区
-      summaries<br/>📝 上下文压缩<br/>is_active 标识当前有效<br/>agent 重启必查
-      message_queue<br/>📥 待处理消息<br/>thread 内 FIFO<br/>id ASC 顺序消费
+      agent_sub_agents<br/>子agent编排
+      threads<br/>🧵 对话线程<br/>双状态字段 ★RT
+      thread_launch_prefs<br/>🚀 启动偏好
+      run_events<br/>📊 执行日志<br/>无界增长需分区
+      summaries<br/>📝 上下文压缩<br/>agent重启必查
+      message_queue<br/>📥 待处理消息 FIFO
       file_operations<br/>📁 文件操作记录
-      tool_tasks<br/>⚙️ 长任务追踪<br/>进度 · 状态 · 结果 ★Realtime
-      schedules<br/>⏰ 定时任务<br/>cron 表达式<br/>next_run_at ASC 索引
-      schedule_runs<br/>📅 调度执行记录
-      checkpoints<br/>💾 LangGraph 状态<br/>🔴 严禁前端访问<br/>含完整对话状态
+      tool_tasks<br/>长任务追踪 ★RT
+      schedules<br/>⏰ 定时任务
+      schedule_runs<br/>调度执行记录
+      checkpoints<br/>💾 LangGraph状态<br/>🔴 严禁前端访问
       checkpoint_blobs<br/>💾 LangGraph Blob
-      checkpoint_writes<br/>💾 LangGraph 写入
-      checkpoint_migrations<br/>💾 LangGraph 迁移
+      checkpoint_writes<br/>💾 LangGraph写入
+      checkpoint_migrations<br/>💾 LangGraph迁移
 
-    **container**<br/>计算基础设施<br/>三层模型<br/>daemon 通过 mycel-container 写入
-      devices<br/>💻 用户计算端点<br/>心跳 + 乐观锁 version<br/>push_token 归此 ★Realtime
-      environments<br/>🐳 隔离执行环境<br/>desired ↔ observed 双轨<br/>provider: local·docker·fly ★Realtime
-      workspaces<br/>📂 项目工作区<br/>desired ↔ observed 双轨<br/>recipe_snapshot 创建时快照 ★Realtime
+    container<br/>计算基础设施<br/>三层模型
+      devices<br/>💻 用户计算端点<br/>心跳+乐观锁 ★RT
+      environments<br/>🐳 隔离执行环境<br/>desired与observed双轨 ★RT
+      workspaces<br/>📂 项目工作区<br/>desired与observed双轨 ★RT
 
-    **hub**<br/>Agent 市场<br/>3 张表<br/>允许匿名浏览
-      publishers<br/>🏢 发布者主体<br/>关联 identity.users<br/>status: active · suspended
-      marketplace_items<br/>📦 市场商品<br/>全文搜索 tsvector<br/>GIN 索引 · tags 数组
-      marketplace_versions<br/>🔖 语义版本<br/>yanked 下架标记<br/>install_count 统计
+    hub<br/>Agent市场<br/>匿名可浏览
+      publishers<br/>🏢 发布者主体
+      marketplace_items<br/>📦 市场商品<br/>全文搜索tsvector
+      marketplace_versions<br/>🔖 语义版本<br/>yanked下架标记
 ```
+
+> `★RT` = 已加入 Realtime publication · `🔴` = 安全敏感，禁止前端直接访问
 
 ---
 
