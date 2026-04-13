@@ -518,3 +518,202 @@ agent 产出大量内容（代码、分析报告、日志）。"我让 agent 分
 
 ### Q30: message_pins 为什么是独立表而不是 messages 加 pinned_at 字段？
 一个 chat 里可以 pin 多条消息，需要查"这个 chat 所有 pinned 消息"。如果是字段，要 `WHERE chat_id = ? AND pinned_at IS NOT NULL`——可以工作但语义不清晰。独立表还能记录"谁 pin 的"（pinned_by），支持 unpin 就是删行。
+
+---
+
+## 全局视图
+
+> 2026-04-13，所有 schema DDL 完成后汇总（34–38 文件已 commit）
+
+---
+
+### 一、跨 schema 依赖总矩阵
+
+行 = 依赖方，列 = 被依赖方，格内列出具体的 应用层 FK 关系（无 DB 约束）。
+
+| 依赖方 ↓ / 被依赖 → | **identity** | **chat** | **agent** | **container** | **hub** |
+|-------------------|-------------|---------|----------|--------------|--------|
+| **identity** | — | ❌ | ❌ | ❌ | ❌ |
+| **chat** | `messages.sender_user_id` → users<br>`chat_members.user_id` → users<br>`contacts / relationships` → users<br>`message_attachments.asset_id` → assets | — | ❌ | `message_deliveries.device_id` → devices<br>（push 路由） | ❌ |
+| **agent** | `agent_configs.agent_user_id` → users<br>`agent_configs.owner_user_id` → users<br>`threads.agent_user_id / owner_user_id` → users<br>`schedules.owner_user_id` → users<br>运行时读 model_providers + model_mappings（模型解析） | `run_events.message_id` → messages<br>（可选，关联 chat 消息） | — | `threads.current_workspace_id` → workspaces | ❌ |
+| **container** | `devices.owner_user_id` → users<br>`environments.owner_user_id` → users<br>`workspaces.owner_user_id` → users | ❌ | ❌ | — | ❌ |
+| **hub** | `publishers.user_id` → users<br>`versions.published_by` → users | ❌ | ❌ | ❌ | — |
+
+**结论**：
+- identity 是纯根层，零外向依赖
+- hub 是最孤立的叶节点，只依赖 identity.users（ID 存储，无 DB FK）
+- agent 是依赖最广的模块（identity + container + 可选 chat）
+- container 只依赖 identity（owner 冗余字段）
+- **chat 缺失完整 DDL 和 RLS**（见下方一致性检查 #1）
+
+---
+
+### 二、全局 Realtime 发布清单
+
+#### 汇总表
+
+| schema | 表 | 事件 | 前端用途 | 优先级 |
+|--------|---|------|---------|-------|
+| identity | `identity.users` | UPDATE | chat 消息列表中头像 / 名字实时刷新 | 必须 |
+| identity | `identity.model_providers` | UPDATE | 设置页：provider 探测失败即时提示 | 必须 |
+| chat | `chat.messages` | INSERT | 新消息实时推送（IM 核心） | 必须 |
+| chat | `chat.relationships` | INSERT, UPDATE | 好友请求通知 | 必须 |
+| chat | `chat.chat_members` | UPDATE | 成员变更（入群/踢出/禁言） | 可选 |
+| agent | `agent.threads` | UPDATE | `run_status` 变化驱动前端加载动画 / 状态栏 | 必须 |
+| agent | `agent.tool_tasks` | INSERT, UPDATE | 长任务进度条（任务创建 + 进度更新） | 必须 |
+| agent | `agent.schedules` | UPDATE | 设置页：next_run_at / last_run_at 实时更新 | 可选 |
+| container | `container.devices` | UPDATE | 设备面板：在线 / 离线状态实时切换 | 必须 |
+| container | `container.environments` | INSERT, UPDATE | 环境启动进度（detached → creating → running） | 必须 |
+| container | `container.workspaces` | INSERT, UPDATE | 工作区状态 + needs_refresh 完成通知 | 必须 |
+| hub | `hub.marketplace_items` | UPDATE | item install_count / 状态变更 | 可选 |
+| hub | `hub.marketplace_versions` | INSERT | 新版本发布通知（订阅了该 item 的用户） | 可选 |
+
+#### 合并 ALTER PUBLICATION 语句
+
+```sql
+-- 必须开启的表（核心实时体验）
+ALTER PUBLICATION supabase_realtime ADD TABLE
+    identity.users,
+    identity.model_providers,
+    chat.messages,
+    chat.relationships,
+    agent.threads,
+    agent.tool_tasks,
+    container.devices,
+    container.environments,
+    container.workspaces;
+
+-- 可选（按需开启，低频或可轮询替代）
+-- ALTER PUBLICATION supabase_realtime ADD TABLE
+--     chat.chat_members,
+--     agent.schedules,
+--     hub.marketplace_items,
+--     hub.marketplace_versions;
+```
+
+**注意**：Supabase Realtime 的 `postgres_changes` 在 broadcast 前自动应用 RLS，
+但 `identity.users` 的 RLS 是 `USING(true)`——所有认证用户可读所有行，意味着任何用户的
+profile 更新都会推给所有订阅者。**前端必须加 filter**（如订阅特定 user_id 集合）避免无关更新洪水。
+
+---
+
+### 三、全局 RLS 一致性检查
+
+#### 问题清单
+
+**#1 [阻塞] chat schema 完整 RLS 未定义**
+
+32-schema-decisions.md 明确写了"RLS 策略必须——Supabase Realtime 用 anon key，无 RLS = 任何人能订阅任何 chat"，但至今没有 chat schema 的 DDL 文件。chat 有 9 张表，含 messages、relationships 等高敏感表，是当前设计中最大的空洞。
+
+→ **待做**：参照 35（container）/ 36（identity）深度，补完 chat schema 完整 DDL + RLS + Realtime + RPC（至少覆盖 `chats / messages / chat_members / contacts / relationships`）。
+
+---
+
+**#2 [风险] identity.users USING(true) Realtime 广播放大**
+
+policy 限定 `TO authenticated`（anon 无访问），但所有已登录用户的 UPDATE 事件都会推给全体订阅者。
+大型部署下（1000+ 在线用户），一个用户改名会触发 1000+ 条 Realtime 推送。
+
+→ 前端订阅时必须加 filter（e.g. `filter: 'id=in.(uid1,uid2,...)'`，只订阅当前 chat 里的成员）。
+→ 未来如有保密 agent user 需求，考虑改为 `USING(id = auth.uid() OR type = 'human')`。
+
+---
+
+**#3 [需确认] hub 部分策略无 TO 角色限定 = anon 可访问**
+
+hub 策略中 `publishers_select_all` / `items_select_published_or_own` / `versions_select_active_or_own` 未写 `TO authenticated`，依 PostgreSQL 规则会对 anon 角色生效（前提是 anon 有 table 的 GRANT）。
+
+若 hub 是公开市场（未登录用户可浏览），这是期望行为；若需要登录才能访问，需加 `TO authenticated`。
+→ **待确认**：hub 是否允许匿名浏览。当前假设允许，策略设计正确。
+
+---
+
+**#4 [性能] EXISTS 子查询 RLS 的热路径开销**
+
+以下表的 RLS 策略使用 EXISTS 子查询验证父表归属：
+
+| 表 | 子查询 | 覆盖索引 |
+|---|-------|---------|
+| `agent.agent_rules/skills/sub_agents` | `EXISTS (agent_configs WHERE owner_user_id = uid)` | `idx_agent_configs_owner`（已有） |
+| `agent.run_events / summaries / file_operations / tool_tasks` | `EXISTS (threads WHERE owner_user_id = uid)` | `idx_threads_owner_active`（已有） |
+| `agent.schedule_runs` | `EXISTS (schedules WHERE owner_user_id = uid)` | `idx_schedules_owner`（已有） |
+| `container.workspaces` INSERT | `EXISTS (environments WHERE owner_user_id = uid AND active)` | `idx_environments_owner_active`（已有） |
+| `identity.model_mappings` INSERT | `EXISTS (model_providers WHERE user_id = uid)` | UNIQUE(user_id,name) 前缀（已有） |
+
+当前覆盖索引均已存在，无遗漏。但 `run_events` 高频 SELECT 时每行都触发一次 EXISTS，应在 API 层强制携带 `thread_id` 参数避免全表扫。
+
+---
+
+**#5 [安全] LangGraph 4 张表的 GRANT 红线**
+
+`agent.checkpoints / checkpoint_blobs / checkpoint_writes / checkpoint_migrations` 无 RLS、无 GRANT。
+前端通过 PostgREST 访问需要 GRANT，没有 GRANT 就无访问路径。
+
+⚠️ **严禁** 执行 `GRANT SELECT ON agent.checkpoints TO authenticated / anon`（Supabase dashboard 误操作风险）。
+checkpoints 中存有完整对话状态，含工具调用输入输出（可能含 API key、文件内容）。
+
+---
+
+**#6 [一致性] service_role RPC 内部校验不可省略**
+
+所有 `SECURITY DEFINER` RPC 绕过 RLS，业务校验必须在 RPC 内显式执行：
+
+| RPC | 关键内部校验 |
+|-----|------------|
+| `container.device_heartbeat` | `status != 'disabled'`（被封禁设备不能通过心跳复活） |
+| `hub.publish_version` | `publisher.status != 'suspended'`（被封禁发布者不能发版本） |
+| `identity.set_active_model` | `auth.uid()` 内部取，不信任参数（防 user_id 伪造） |
+| `agent.set_thread_run_status` | 状态机合法转换矩阵（防非法状态跳转） |
+| `hub.yank_version` | 调用者 `user_id = auth.uid()` 校验（防越权 yank） |
+
+---
+
+### 四、全局索引策略摘要
+
+#### 各 schema 最关键查询路径
+
+**identity（热路径：agent 每次调用都走）**
+```
+model_providers(user_id) WHERE status='active'     → idx_model_providers_user_active  ✅
+model_mappings(user_id)  WHERE is_active=true      → idx_model_mappings_active         ✅
+users(owner_user_id)     WHERE type='agent'        → idx_users_owner_agents            ✅
+```
+
+**chat（热路径：IM 核心）**
+```
+messages(chat_id, seq DESC)                        → idx_messages_chat_seq             ✅
+chat_members(user_id)                              → idx_chat_members_user             ✅
+chats(last_message_at DESC) WHERE active           → idx_chats_last_message            ✅
+messages USING GIN(search_vector)                  → idx_messages_search               ✅
+```
+
+**agent（热路径：agent 重启 + 前端轮询）**
+```
+summaries(thread_id)     WHERE is_active=true      → idx_summaries_thread_active       ✅  ← 每次 agent 恢复都查
+threads(owner_user_id, last_active_at DESC) WHERE active → idx_threads_owner_active   ✅
+schedules(next_run_at ASC) WHERE enabled=true      → idx_schedules_next_run            ✅
+message_queue(thread_id, id ASC)                   → idx_message_queue_thread         ✅
+```
+
+**container（热路径：心跳 + 状态协调）**
+```
+devices(owner_user_id, last_heartbeat_at DESC) WHERE online → idx_devices_online      ✅
+environments WHERE desired != observed AND active  → idx_environments_state_mismatch  ✅
+workspaces(refresh_hint_at ASC) WHERE needs_refresh → idx_workspaces_needs_refresh   ✅
+```
+
+**hub（热路径：市场浏览 + 搜索）**
+```
+marketplace_items USING GIN(search_vector)         → idx_items_search_vector          ✅
+marketplace_items(install_count DESC) WHERE public → idx_items_install_count          ✅
+marketplace_items USING GIN(tags)                  → idx_items_tags                   ✅
+```
+
+#### 已识别的缺失 / 待确认索引
+
+| 表 | 缺失索引 | 影响 |
+|---|---------|------|
+| `chat.message_deliveries` | `(device_id)` | 设备下线时批量查未投递消息需要此索引；chat schema DDL 未完成，待补 |
+| `chat.message_deliveries` | `(message_id, status)` | 查某条消息哪些设备未投递（推送补发逻辑）；待补 |
+| `agent.run_events` | 月分区替代行级索引 | 无界增长表，单纯加索引无法根治；建议 `PARTITION BY RANGE(created_at)`，但 Supabase PostgREST 对分区表行为需验证 |
+| `identity.assets` | `(owner_user_id, sha256)` WHERE active | 当前 sha256 索引不含 owner 前缀，同一哈希跨用户去重时需全表扫（低频，可接受） |
