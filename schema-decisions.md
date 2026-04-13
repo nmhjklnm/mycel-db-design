@@ -319,7 +319,7 @@ agent.checkpoint_migrations — LangGraph 版本追踪
 | ~~`agent_registry`~~ | 子 agent 运行时追踪放内存。threads.agent_user_id 已能追踪"哪个 agent 在跑" |
 | ~~`thread_config`~~ | 代码从未读取此表（创建时不读、恢复时不读、运行时不读）。所有字段要么和 threads 重复，要么从未使用 |
 | ~~`eval_*` ×4~~ | 开发工具，不进生产。本地 eval 需求用 SQLite 即可 |
-| ~~`library_recipes`~~ | 移到 container schema（工作区启动模板属于 container 域） |
+| ~~`library_recipes`~~ | 重构为 container.sandbox_templates（沙盒创建蓝图属于 container 域） |
 
 ### 关键决策
 
@@ -348,16 +348,17 @@ device ←── container ←── workspace ←── thread (连接，可切
 
 ### 表清单
 
-**三层核心 (3)**
+**三层核心 (4)**
 ```
 container.devices             — NEW。用户的计算端点，持久，有心跳/在线状态（TODO: 表结构）
-container.environments        — 原 sandbox_instances 重构。environment.device_id → devices
-container.workspaces          — 原 sandbox_leases 重构。workspace.environment_id → environments
+container.sandbox_templates   — NEW。可复用的沙盒创建蓝图
+container.sandboxes           — 原 sandbox_instances 重构。sandbox.device_id → devices
+container.workspaces          — 原 sandbox_leases 重构。workspace.sandbox_id → sandboxes
 ```
 
 **终端层 (5)**
 ```
-container.terminals           — 原 abstract_terminals。terminal.environment_id → environments（指向环境，非 workspace）
+container.terminals           — 原 abstract_terminals。terminal.sandbox_id → sandboxes（指向沙盒，非 workspace）
 container.terminal_pointers   — 原 thread_terminal_pointers
 container.terminal_sessions   — 原 chat_sessions 改名，避免 chat 域混淆
 container.terminal_commands   — 命令历史
@@ -378,33 +379,33 @@ container.provider_events     — 提供商事件审计
 
 **模板 (1)**
 ```
-container.workspace_recipes   — 原 library_recipes，从 agent 移入
+container.sandbox_templates   — 原 library_recipes 概念重构，沙盒创建蓝图
 ```
 
 ### 关键决策
 
-1. **三层模型 device → environment → workspace/terminal** — 替代旧 lease/instance 二层
-2. **terminal 指向 environment** — 终端是环境里的 shell，可在不同 workspace 间 cd
+1. **三层模型 device → sandbox → workspace/terminal** — 替代旧 lease/instance 二层
+2. **terminal 指向 sandbox** — 终端是沙盒里的 shell，可在不同 workspace 间 cd
 3. **thread ↔ workspace 连接关系** — agent.threads.current_workspace_id，可切换，非 1:1 绑定
 4. **volumes 归 device** — 设备持久，workspace 可重建
-5. **DB vs 用户命名** — DB: devices/environments/workspaces；用户: 设备/工作区
+5. **DB vs 用户命名** — DB: devices/sandboxes/workspaces；用户: 设备/工作区
 
 ### 旧表映射
 
 | 旧表 | → 新表 |
 |------|--------|
-| sandbox_leases | → workspaces |
-| sandbox_instances | → environments |
+| sandbox_leases | → container.sandboxes |
+| sandbox_instances | → 吸收进 sandboxes.provider_env_id（无独立表） |
 | abstract_terminals | → terminals |
 | thread_terminal_pointers | → terminal_pointers |
 | chat_sessions | → terminal_sessions |
 | sandbox_volumes | → volumes |
 | lease_resource_snapshots | → resource_snapshots |
-| library_recipes | → workspace_recipes（从 agent 移入）|
+| library_recipes | → container.sandbox_templates（新概念，无直接前身） |
 
 ### TODO
 - [x] devices 表结构（见 container-schema.md）
-- [x] environments 表结构（与旧 sandbox_instances 字段映射，见 container-schema.md）
+- [x] sandboxes 表结构（与旧 sandbox_instances 字段映射，见 container-schema.md）
 - [x] workspaces 表结构（与旧 sandbox_leases 字段映射，见 container-schema.md）
 
 ---
@@ -478,7 +479,7 @@ assets 的 FK 指向 users.id，存的是用户主动管理的静态资源（头
 连接关系，非绑定。多个 thread 可同时连同一个 workspace。agent 切换工作区时框架提示文件上下文不可用，需切回访问。
 
 ### Q17: 数据库命名 vs 用户命名？
-DB: container.devices / container.environments / container.workspaces。用户界面: 设备 / 工作区。environment 层对用户不可见。
+DB: container.devices / container.sandboxes / container.workspaces。用户界面: 设备 / 工作区。sandbox 层对用户不可见。
 
 ### Q18: leon → mycel 改名？
 虚拟模型命名全量改：leon:large → mycel:large, leon:mini → mycel:mini 等。
@@ -536,7 +537,7 @@ agent 产出大量内容（代码、分析报告、日志）。"我让 agent 分
 | **identity** | — | ❌ | ❌ | ❌ | ❌ |
 | **chat** | `messages.sender_user_id` → users<br>`chat_members.user_id` → users<br>`contacts / relationships` → users<br>`message_attachments.asset_id` → assets | — | ❌ | `message_deliveries.device_id` → devices<br>（push 路由） | ❌ |
 | **agent** | `agent_configs.agent_user_id` → users<br>`agent_configs.owner_user_id` → users<br>`threads.agent_user_id / owner_user_id` → users<br>`schedules.owner_user_id` → users<br>运行时读 model_providers + model_mappings（模型解析） | `run_events.message_id` → messages<br>（可选，关联 chat 消息） | — | `threads.current_workspace_id` → workspaces | ❌ |
-| **container** | `devices.owner_user_id` → users<br>`environments.owner_user_id` → users<br>`workspaces.owner_user_id` → users | ❌ | ❌ | — | ❌ |
+| **container** | `devices.owner_user_id` → users<br>`sandboxes.owner_user_id` → users<br>`workspaces.owner_user_id` → users | ❌ | ❌ | — | ❌ |
 | **hub** | `publishers.user_id` → users<br>`versions.published_by` → users | ❌ | ❌ | ❌ | — |
 
 **结论**：
@@ -563,7 +564,7 @@ agent 产出大量内容（代码、分析报告、日志）。"我让 agent 分
 | agent | `agent.tool_tasks` | INSERT, UPDATE | 长任务进度条（任务创建 + 进度更新） | 必须 |
 | agent | `agent.schedules` | UPDATE | 设置页：next_run_at / last_run_at 实时更新 | 可选 |
 | container | `container.devices` | UPDATE | 设备面板：在线 / 离线状态实时切换 | 必须 |
-| container | `container.environments` | INSERT, UPDATE | 环境启动进度（detached → creating → running） | 必须 |
+| container | `container.sandboxes` | INSERT, UPDATE | 沙盒启动进度（detached → creating → running） | 必须 |
 | container | `container.workspaces` | INSERT, UPDATE | 工作区状态 + needs_refresh 完成通知 | 必须 |
 | hub | `hub.marketplace_items` | UPDATE | item install_count / 状态变更 | 可选 |
 | hub | `hub.marketplace_versions` | INSERT | 新版本发布通知（订阅了该 item 的用户） | 可选 |
@@ -580,7 +581,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE
     agent.threads,
     agent.tool_tasks,
     container.devices,
-    container.environments,
+    container.sandboxes,
     container.workspaces;
 
 -- 可选（按需开启，低频或可轮询替代）
@@ -637,7 +638,7 @@ hub 策略中 `publishers_select_all` / `items_select_published_or_own` / `versi
 | `agent.agent_rules/skills/sub_agents` | `EXISTS (agent_configs WHERE owner_user_id = uid)` | `idx_agent_configs_owner`（已有） |
 | `agent.run_events / summaries / file_operations / tool_tasks` | `EXISTS (threads WHERE owner_user_id = uid)` | `idx_threads_owner_active`（已有） |
 | `agent.schedule_runs` | `EXISTS (schedules WHERE owner_user_id = uid)` | `idx_schedules_owner`（已有） |
-| `container.workspaces` INSERT | `EXISTS (environments WHERE owner_user_id = uid AND active)` | `idx_environments_owner_active`（已有） |
+| `container.workspaces` INSERT | `EXISTS (sandboxes WHERE owner_user_id = uid AND active)` | `idx_sandboxes_owner_active`（已有） |
 | `identity.model_mappings` INSERT | `EXISTS (model_providers WHERE user_id = uid)` | UNIQUE(user_id,name) 前缀（已有） |
 
 当前覆盖索引均已存在，无遗漏。但 `run_events` 高频 SELECT 时每行都触发一次 EXISTS，应在 API 层强制携带 `thread_id` 参数避免全表扫。
@@ -698,7 +699,7 @@ message_queue(thread_id, id ASC)                   → idx_message_queue_thread 
 **container（热路径：心跳 + 状态协调）**
 ```
 devices(owner_user_id, last_heartbeat_at DESC) WHERE online → idx_devices_online      ✅
-environments WHERE desired != observed AND active  → idx_environments_state_mismatch  ✅
+sandboxes WHERE desired != observed AND active     → idx_sandboxes_state_mismatch     ✅
 workspaces(refresh_hint_at ASC) WHERE needs_refresh → idx_workspaces_needs_refresh   ✅
 ```
 

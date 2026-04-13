@@ -48,7 +48,7 @@ mindmap
 
     container<br/>计算基础设施<br/>三层模型
       devices<br/>💻 用户计算端点<br/>心跳+乐观锁 ★RT
-      environments<br/>🐳 隔离执行环境<br/>desired与observed双轨 ★RT
+      sandboxes<br/>🐳 双轨状态机 sandbox config ★RT
       workspaces<br/>📂 项目工作区<br/>desired与observed双轨 ★RT
 
     hub<br/>Agent市场<br/>匿名可浏览
@@ -65,15 +65,15 @@ mindmap
 
 | 模式 | 用在哪里 | 解决什么问题 |
 |------|---------|------------|
-| **双轨状态机** `desired_state / observed_state` | container.environments · workspaces | 用户意图（控制面写）与实际状态（daemon 上报）分离，差异驱动收敛 |
-| **乐观锁** `version INTEGER` | devices · environments · workspaces · chat_members | 心跳/状态上报高并发时防覆写，CAS 更新，冲突则调用方重试 |
+| **双轨状态机** `desired_state / observed_state` | container.sandboxes · workspaces | 用户意图（控制面写）与实际状态（daemon 上报）分离，差异驱动收敛 |
+| **乐观锁** `version INTEGER` | devices · sandboxes · workspaces · chat_members | 心跳/状态上报高并发时防覆写，CAS 更新，冲突则调用方重试 |
 | **软删除** `status = 'deleted'` | 全局 | 数据可恢复；Realtime 触发 UPDATE 事件而非 DELETE，前端拿到完整行再处理 |
 | **冗余 `owner_user_id`** | agent · container（跨 schema 查询） | 避免跨表 JOIN，直接按 owner 过滤，也用于 RLS 策略 |
 | **应用层 FK（无 DB 外键约束）** | 所有跨 schema 关联 | 避免跨 schema 锁表；允许未来按 schema 拆分数据库 |
 | **`SECURITY DEFINER` RPC** | 心跳·状态上报·seq 分配·未读计数 | 绕过 RLS 做原子操作，业务校验在 RPC 内部显式执行 |
 | **部分索引** `WHERE status = 'active'` | 全局 | 只索引有效行，减少索引体积，提升扫描效率 |
 | **`is_member()` 辅助函数** | chat schema 所有 RLS 策略 | `STABLE` 缓存优化，同一 query 内多次 RLS 判断只查一次 |
-| **recipe_snapshot 快照** | container.workspaces | 创建时固化 recipe，recipe 后续变更不影响已有工作区的重建 |
+| **config 固化** | container.sandboxes | 创建时固化 template 参数，template 后续变更不影响已创建的 sandbox |
 | **水位线未读计数** | chat.chat_members.last_read_seq | O(1) 计算未读数：`next_message_seq - 1 - last_read_seq`，不扫消息表 |
 
 ---
@@ -93,7 +93,7 @@ mindmap
   ┌────────────────┐    ┌─────────────────┐    ┌──────────────────┐
   │     chat       │    │     agent       │    │    container     │
   │ messages_for_  │    │ threads ──────────────→ workspaces      │
-  │ user(VIEW)     │    │ run_events      │    │ environments     │
+  │ user(VIEW)     │    │ run_events      │    │ sandboxes        │
   │ chat_members   │    │ tool_tasks      │    │ devices ◄────────┤
   │ relationships  │    │ schedules       │    └──────────────────┘
   └───────┬────────┘    └─────────────────┘             │
@@ -123,7 +123,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE
     agent.threads,            -- AI 运行状态 → 前端进度条
     agent.tool_tasks,         -- 长任务进度实时更新
     container.devices,        -- 设备在线 / 离线状态
-    container.environments,   -- 环境启动进度
+    container.sandboxes,      -- 沙盒启动进度
     container.workspaces;     -- 工作区状态 + 重建进度
 
 -- ⚠ 可选（低频，可轮询替代）
@@ -428,7 +428,7 @@ erDiagram
 
 ---
 
-### container — 计算基础设施（3 表）
+### container — 计算基础设施（4 表）
 
 ```mermaid
 erDiagram
@@ -446,13 +446,26 @@ erDiagram
         timestamptz last_heartbeat_at
         int version "乐观锁"
     }
-    environments {
+    sandbox_templates {
+        text id PK
+        text owner_user_id FK "NULL = 系统公共模板"
+        text name
+        text provider_name "docker · e2b · fly · local · NULL"
+        text image
+        jsonb resource_spec
+        jsonb env_vars
+        text init_script
+        text status "active · deprecated"
+    }
+    sandboxes {
         text id PK
         text device_id FK
         text owner_user_id FK
         text provider_name "local · docker · fly · e2b"
         text provider_env_id UK "同设备下唯一"
         text image
+        text template_id FK "来源模板，手动创建时为 NULL"
+        jsonb config "实际生效参数，创建后固化"
         text desired_state "running · stopped"
         text observed_state "running · stopped · creating · detached · error"
         text status "active · archived · deleted"
@@ -462,11 +475,9 @@ erDiagram
     }
     workspaces {
         text id PK
-        text environment_id FK
+        text sandbox_id FK
         text owner_user_id FK
-        text workspace_path UK "同环境下唯一"
-        text recipe_id FK
-        jsonb recipe_snapshot "创建时快照，重建用"
+        text workspace_path UK "同沙盒下唯一"
         text volume_id FK
         text desired_state "running · stopped"
         text observed_state "running · stopped · creating · detached · error"
@@ -476,8 +487,9 @@ erDiagram
         int version "乐观锁"
     }
 
-    devices ||--o{ environments : "托管"
-    environments ||--o{ workspaces : "包含"
+    devices ||--o{ sandboxes : "托管"
+    sandbox_templates ||--o{ sandboxes : "创建来源"
+    sandboxes ||--o{ workspaces : "包含"
 ```
 
 ---
@@ -526,6 +538,6 @@ erDiagram
 |-----|-----------|------|
 | `device_heartbeat(device_id, version, capabilities?)` | container | 心跳 + CAS 更新，含 10s 节流防 DDoS |
 | `device_disconnect(device_id)` | container | 原子级联：设备→offline，环境→detached，工作区→detached |
-| `environment_observe / workspace_observe` | container | daemon 上报实际状态，返回 desired_state 作指令 |
+| `sandbox_observe / workspace_observe` | container | daemon 上报实际状态，返回 desired_state 作指令 |
 | `count_unread_per_chat()` | chat | 基于水位线批量计算未读数，user_id 从 auth.uid() 取 |
 | `mark_read(chat_id, seq)` | chat | 更新 last_read_seq 水位线，只前进不后退 |
