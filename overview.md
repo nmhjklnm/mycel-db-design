@@ -309,9 +309,21 @@ erDiagram
         text system_prompt
         jsonb mcp_json
     }
-    agent_rules { text id PK; text config_id FK }
-    agent_skills { text id PK; text config_id FK }
-    agent_sub_agents { text id PK; text config_id FK; text sub_agent_user_id FK }
+    agent_rules {
+        text id PK
+        text config_id FK
+        text rule
+    }
+    agent_skills {
+        text id PK
+        text config_id FK
+        text name
+    }
+    agent_sub_agents {
+        text id PK
+        text config_id FK
+        text sub_agent_user_id FK
+    }
 
     threads {
         text id PK
@@ -323,7 +335,11 @@ erDiagram
         timestamptz last_active_at
         int version
     }
-    thread_launch_prefs { text id PK; text thread_id FK; jsonb prefs }
+    thread_launch_prefs {
+        text id PK
+        text thread_id FK
+        jsonb prefs
+    }
 
     run_events {
         text id PK
@@ -346,7 +362,12 @@ erDiagram
         text content
         timestamptz created_at "id ASC 顺序消费"
     }
-    file_operations { text id PK; text thread_id FK; text operation; text path }
+    file_operations {
+        text id PK
+        text thread_id FK
+        text operation
+        text path
+    }
     tool_tasks {
         text id PK
         text thread_id FK
@@ -364,16 +385,34 @@ erDiagram
         boolean enabled
         timestamptz next_run_at
     }
-    schedule_runs { text id PK; text schedule_id FK; text status; timestamptz ran_at }
+    schedule_runs {
+        text id PK
+        text schedule_id FK
+        text status
+        timestamptz ran_at
+    }
 
     checkpoints {
         text thread_id PK "LangGraph checkpoint_id"
         text checkpoint_id PK
         jsonb metadata
     }
-    checkpoint_blobs { text thread_id PK; text checkpoint_id PK; text channel PK }
-    checkpoint_writes { text thread_id PK; text checkpoint_id PK; int idx PK }
-    checkpoint_migrations { int v PK }
+    checkpoint_blobs {
+        text thread_id PK
+        text checkpoint_id PK
+        text channel PK
+        bytea data
+    }
+    checkpoint_writes {
+        text thread_id PK
+        text checkpoint_id PK
+        int idx PK
+        text channel
+        jsonb value
+    }
+    checkpoint_migrations {
+        int v PK
+    }
 
     agent_configs ||--o{ agent_rules : ""
     agent_configs ||--o{ agent_skills : ""
