@@ -351,13 +351,13 @@ device ←── container ←── workspace ←── thread (连接，可切
 **三层核心 (3)**
 ```
 container.devices             — NEW。用户的计算端点，持久，有心跳/在线状态（TODO: 表结构）
-container.containers          — 原 sandbox_instances 重构。container.device_id → devices
-container.workspaces          — 原 sandbox_leases 重构。workspace.container_id → containers
+container.environments        — 原 sandbox_instances 重构。environment.device_id → devices
+container.workspaces          — 原 sandbox_leases 重构。workspace.environment_id → environments
 ```
 
 **终端层 (5)**
 ```
-container.terminals           — 原 abstract_terminals。terminal.container_id → containers（指向容器，非 workspace）
+container.terminals           — 原 abstract_terminals。terminal.environment_id → environments（指向环境，非 workspace）
 container.terminal_pointers   — 原 thread_terminal_pointers
 container.terminal_sessions   — 原 chat_sessions 改名，避免 chat 域混淆
 container.terminal_commands   — 命令历史
@@ -383,18 +383,18 @@ container.workspace_recipes   — 原 library_recipes，从 agent 移入
 
 ### 关键决策
 
-1. **三层模型 device → container → workspace/terminal** — 替代旧 lease/instance 二层
-2. **terminal 指向 container** — 终端是容器里的 shell，可在不同 workspace 间 cd
+1. **三层模型 device → environment → workspace/terminal** — 替代旧 lease/instance 二层
+2. **terminal 指向 environment** — 终端是环境里的 shell，可在不同 workspace 间 cd
 3. **thread ↔ workspace 连接关系** — agent.threads.current_workspace_id，可切换，非 1:1 绑定
 4. **volumes 归 device** — 设备持久，workspace 可重建
-5. **DB vs 用户命名** — DB: devices/containers/workspaces；用户: 设备/工作区
+5. **DB vs 用户命名** — DB: devices/environments/workspaces；用户: 设备/工作区
 
 ### 旧表映射
 
 | 旧表 | → 新表 |
 |------|--------|
 | sandbox_leases | → workspaces |
-| sandbox_instances | → containers |
+| sandbox_instances | → environments |
 | abstract_terminals | → terminals |
 | thread_terminal_pointers | → terminal_pointers |
 | chat_sessions | → terminal_sessions |
@@ -403,9 +403,9 @@ container.workspace_recipes   — 原 library_recipes，从 agent 移入
 | library_recipes | → workspace_recipes（从 agent 移入）|
 
 ### TODO
-- [ ] devices 表结构
-- [ ] containers 表结构（与旧 sandbox_instances 字段映射）
-- [ ] workspaces 表结构（与旧 sandbox_leases 字段映射）
+- [x] devices 表结构（见 container-schema.md）
+- [x] environments 表结构（与旧 sandbox_instances 字段映射，见 container-schema.md）
+- [x] workspaces 表结构（与旧 sandbox_leases 字段映射，见 container-schema.md）
 
 ---
 
@@ -478,7 +478,7 @@ assets 的 FK 指向 users.id，存的是用户主动管理的静态资源（头
 连接关系，非绑定。多个 thread 可同时连同一个 workspace。agent 切换工作区时框架提示文件上下文不可用，需切回访问。
 
 ### Q17: 数据库命名 vs 用户命名？
-DB: container.devices / container.containers / container.workspaces。用户界面: 设备 / 工作区。container 层对用户不可见。
+DB: container.devices / container.environments / container.workspaces。用户界面: 设备 / 工作区。environment 层对用户不可见。
 
 ### Q18: leon → mycel 改名？
 虚拟模型命名全量改：leon:large → mycel:large, leon:mini → mycel:mini 等。
