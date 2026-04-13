@@ -7,6 +7,277 @@
 
 ---
 
+## DDL
+
+> 字段与 §a 索引、§b RLS 严格对齐：RLS 中出现的列 DDL 里必须有，
+> REVOKE/GRANT 列出的字段名与 CREATE TABLE 一致。
+
+```sql
+CREATE SCHEMA IF NOT EXISTS identity;
+
+CREATE SEQUENCE IF NOT EXISTS identity.mycel_id_seq START 1;
+
+
+-- ================================================================
+-- 1. identity.users
+-- 根身份表：human + agent 共表
+-- human: 真实用户；agent: AI agent（owner_user_id 指向创建者）
+-- identity ↔ agent 循环引用：agent_config_id 创建后回填
+-- ================================================================
+
+CREATE TABLE identity.users (
+    id              TEXT        PRIMARY KEY,
+    -- 类型
+    type            TEXT        NOT NULL,
+        -- 'human' | 'agent'
+    -- 展示信息（前端可改：GRANT UPDATE(display_name, avatar, bio)）
+    display_name    TEXT        NOT NULL,
+    avatar          TEXT,
+        -- → identity.assets.id（应用层）；未设头像时为 NULL
+    bio             TEXT,
+    -- 登录 & 识别
+    email           TEXT        UNIQUE,
+        -- 登录邮箱；human 必有，agent 为 NULL
+    mycel_id        INTEGER     UNIQUE,
+        -- 全局递增数字 ID，由 identity.next_mycel_id() 分配
+    -- agent 专属（服务端管理；REVOKE UPDATE 保护）
+    owner_user_id   TEXT,
+        -- → identity.users.id；agent 类型指向创建者 human，human 为 NULL
+    agent_config_id TEXT,
+        -- → agent.agent_configs.id（循环引用，应用层 FK）
+        -- 顺序：INSERT user → INSERT agent_config → UPDATE user.agent_config_id
+    -- 时间戳
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT users_type_chk CHECK (type IN ('human', 'agent'))
+);
+
+CREATE INDEX idx_users_type
+    ON identity.users(type, created_at DESC);
+
+CREATE INDEX idx_users_owner_agents
+    ON identity.users(owner_user_id)
+    WHERE type = 'agent' AND owner_user_id IS NOT NULL;
+
+CREATE INDEX idx_users_agent_config
+    ON identity.users(agent_config_id)
+    WHERE agent_config_id IS NOT NULL;
+
+CREATE INDEX idx_users_avatar
+    ON identity.users(avatar)
+    WHERE avatar IS NOT NULL;
+
+
+-- ================================================================
+-- 2. identity.accounts
+-- 登录凭据（1 user : 1 account，UNIQUE user_id）
+-- password_hash / api_key_hash：REVOKE SELECT FROM authenticated
+-- ================================================================
+
+CREATE TABLE identity.accounts (
+    id            TEXT        PRIMARY KEY,
+    user_id       TEXT        NOT NULL UNIQUE,
+        -- → identity.users.id（应用层）；1:1 关系
+    username      TEXT        NOT NULL UNIQUE,
+        -- 登录名（可与 email 不同，支持用户名登录）
+    password_hash TEXT,
+        -- bcrypt 哈希；NULL = 仅 API key 登录
+    api_key_hash  TEXT,
+        -- bcrypt(raw_api_key)；NULL = 未启用 API key 认证
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- accounts 所有查询走 PK(id) 或 UNIQUE(user_id) / UNIQUE(username)，无需额外索引
+
+
+-- ================================================================
+-- 3. identity.assets
+-- 用户主动管理的静态资源（头像、上传文件）
+-- agent 产出物不进此表（走 container.volumes）
+-- kind='avatar' 对所有认证用户公开（见 RLS §b）
+-- ================================================================
+
+CREATE TABLE identity.assets (
+    id            TEXT        PRIMARY KEY,
+    owner_user_id TEXT        NOT NULL,
+        -- → identity.users.id（应用层）
+    kind          TEXT        NOT NULL,
+        -- 'avatar' | 'document' | 'image' | 'audio' | 'video' | 'other'
+    storage_key   TEXT        NOT NULL,
+        -- Supabase Storage 对象路径，e.g. "avatars/uid_abc/photo.jpg"
+    filename      TEXT,
+        -- 原始文件名（展示用，不影响 storage 路径）
+    size_bytes    INTEGER,
+        -- 文件大小（字节）
+    content_type  TEXT,
+        -- MIME 类型，e.g. "image/jpeg"
+    sha256        TEXT,
+        -- 文件内容 SHA-256（hex）；上传前去重检查用
+    deleted_at    TIMESTAMPTZ,
+        -- 软删除：前端 UPDATE deleted_at=now()
+        -- 实际 storage 删除由 service_role 定时任务执行
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        -- 无 updated_at：资产不可编辑，只能软删除
+);
+
+CREATE INDEX idx_assets_owner_active
+    ON identity.assets(owner_user_id, created_at DESC)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_assets_owner_kind
+    ON identity.assets(owner_user_id, kind)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_assets_sha256
+    ON identity.assets(sha256)
+    WHERE deleted_at IS NULL;
+
+
+-- ================================================================
+-- 4. identity.user_settings
+-- KV 设置存储；(user_id, scope) 复合 PK
+-- 合并写入走 identity.upsert_user_setting RPC（JSONB merge，防并发覆盖）
+-- ================================================================
+
+CREATE TABLE identity.user_settings (
+    user_id    TEXT        NOT NULL,
+        -- → identity.users.id（应用层）
+    scope      TEXT        NOT NULL,
+        -- 'general' | 'ui' | 'observation' | ...（可扩展，不加 CHECK）
+    config     JSONB       NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (user_id, scope)
+);
+-- PK 前缀 (user_id) 已覆盖"获取用户所有设置"查询，无需额外索引
+
+
+-- ================================================================
+-- 5. identity.invite_codes
+-- 邀请码注册控制。兑换走 identity.redeem_invite_code RPC（防枚举）
+-- code 生成：gen_random_bytes(9) → Base64（≥12 字符，72 bit 熵）
+-- ================================================================
+
+CREATE TABLE identity.invite_codes (
+    code       TEXT        PRIMARY KEY,
+    created_by TEXT,
+        -- → identity.users.id；NULL = 系统初始化生成
+    used_by    TEXT,
+        -- → identity.users.id；NULL = 未兑换
+    used_at    TIMESTAMPTZ,
+        -- 兑换时间；NULL = 未兑换
+    expires_at TIMESTAMPTZ,
+        -- 过期时间；NULL = 永不过期
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- used_by 和 used_at 必须同时有或同时无
+    CONSTRAINT invite_codes_used_pair_chk
+        CHECK ((used_by IS NULL) = (used_at IS NULL))
+);
+
+CREATE INDEX idx_invite_codes_creator
+    ON identity.invite_codes(created_by)
+    WHERE created_by IS NOT NULL;
+
+CREATE INDEX idx_invite_codes_expires
+    ON identity.invite_codes(expires_at)
+    WHERE used_at IS NULL AND expires_at IS NOT NULL;
+
+CREATE INDEX idx_invite_codes_used_by
+    ON identity.invite_codes(used_by)
+    WHERE used_by IS NOT NULL;
+
+
+-- ================================================================
+-- 6. identity.model_providers
+-- 用户的 LLM 提供商连接（有生命周期：状态、健康检查、错误）
+-- api_key_enc：服务端 AES-256-GCM 加密，REVOKE SELECT FROM authenticated
+-- INSERT 不开放前端：前端提交明文 key → 后端加密 → service_role INSERT
+-- ================================================================
+
+CREATE TABLE identity.model_providers (
+    id            TEXT        PRIMARY KEY,
+    user_id       TEXT        NOT NULL,
+        -- → identity.users.id（应用层）
+    name          TEXT        NOT NULL,
+        -- 用户自定义名称，e.g. "我的 302.ai"；同用户下唯一
+    provider_type TEXT        NOT NULL,
+        -- 'openai_compatible' | 'anthropic' | 'openrouter'
+    base_url      TEXT        NOT NULL,
+        -- API endpoint，e.g. "https://api.openai.com/v1"
+    api_key_enc   TEXT        NOT NULL,
+        -- AES-256-GCM 加密密文；master key 存 K8s Secret/Vault，与 DB 物理隔离
+    status        TEXT        NOT NULL DEFAULT 'active',
+        -- 'active' | 'error' | 'disabled'
+    last_check_at TIMESTAMPTZ,
+        -- 最后一次健康探测时间
+    last_error    TEXT,
+        -- 最后一次探测失败原因（展示给用户）
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT model_providers_type_chk
+        CHECK (provider_type IN ('openai_compatible', 'anthropic', 'openrouter')),
+    CONSTRAINT model_providers_status_chk
+        CHECK (status IN ('active', 'error', 'disabled')),
+    UNIQUE (user_id, name)
+);
+
+CREATE INDEX idx_model_providers_user_active
+    ON identity.model_providers(user_id)
+    WHERE status = 'active';
+
+CREATE INDEX idx_model_providers_health_sweep
+    ON identity.model_providers(last_check_at ASC NULLS FIRST)
+    WHERE status = 'active';
+
+
+-- ================================================================
+-- 7. identity.model_mappings
+-- 模型别名 → provider + model_name 的映射
+-- is_active：REVOKE UPDATE FROM authenticated，走 set_active_model RPC（防并发冲突）
+-- ================================================================
+
+CREATE TABLE identity.model_mappings (
+    id           TEXT             PRIMARY KEY,
+    user_id      TEXT             NOT NULL,
+        -- → identity.users.id（应用层）
+    alias        TEXT             NOT NULL,
+        -- 虚拟别名，e.g. 'mycel:large' | 'claude-opus-4-6'
+    provider_id  TEXT             NOT NULL,
+        -- → identity.model_providers.id（应用层）
+    model_name   TEXT             NOT NULL,
+        -- 提供商侧真实模型 ID，e.g. "claude-opus-4-6-20251101"
+    enabled      BOOLEAN          NOT NULL DEFAULT true,
+    is_active    BOOLEAN          NOT NULL DEFAULT false,
+        -- 每用户同时只有一条为 true（set_active_model RPC 原子保证）
+    temperature  DOUBLE PRECISION,
+        -- NULL = 使用提供商默认
+    max_tokens   INTEGER,
+        -- NULL = 使用提供商默认
+    extra_config JSONB            NOT NULL DEFAULT '{}',
+        -- top_p / frequency_penalty 等扩展参数
+    created_at   TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ      NOT NULL DEFAULT now(),
+
+    UNIQUE (user_id, alias)
+);
+
+CREATE INDEX idx_model_mappings_provider
+    ON identity.model_mappings(provider_id);
+
+CREATE INDEX idx_model_mappings_active
+    ON identity.model_mappings(user_id)
+    WHERE is_active = true;
+
+CREATE INDEX idx_model_mappings_user_enabled
+    ON identity.model_mappings(user_id)
+    WHERE enabled = true;
+```
+
+---
+
 ## 7 张表清单
 
 | 表 | 来源 | 核心字段（已有定义处） |
