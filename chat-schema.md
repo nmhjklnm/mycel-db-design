@@ -13,6 +13,8 @@
 > - `relationships` 状态变更（accept/block/reject）走 RPC，不开放前端直接 UPDATE
 > - `message_deliveries` INSERT/UPDATE 全部走 service_role（push 投递追踪是后端职责）
 > - `chat_members` INSERT 走 service_role（加减成员需要业务校验，不开放前端直接 INSERT）
+> - **开发者应通过 `chat.messages_for_user` VIEW 查消息，不要直接查 `chat.messages`**
+>   （per-user 软删除在 VIEW 里过滤，避免每个调用方手动加条件）
 
 ---
 
@@ -345,6 +347,19 @@ CREATE INDEX idx_relationships_pending
     WHERE status = 'pending';
     -- user_high 通常是被请求方（initiator 是 user_low 时）；
     -- 实际应扫 user_low 和 user_high 两个索引，应用层合并
+
+
+-- ================================================================
+-- chat.messages_for_user
+-- 过滤掉当前用户已软删除的消息（deleted_for_user_ids 包含 auth.uid()）
+-- 开发者应优先查这个 VIEW，而不是直接查 chat.messages
+-- ================================================================
+CREATE OR REPLACE VIEW chat.messages_for_user
+    WITH (security_invoker = true)   -- 以调用者身份执行，自动应用 RLS
+AS
+SELECT *
+FROM chat.messages
+WHERE NOT (deleted_for_user_ids @> to_jsonb(auth.uid()::text));
 ```
 
 ---
